@@ -6,15 +6,41 @@ Uses Playwright browser for:
 3. Image uploads to XHS CDN
 """
 
+import http.client
+import ipaddress
 import json
 import os
+import socket
+import ssl
+import tempfile
 import threading
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from fastmcp import FastMCP
 
 COOKIE_DIR = Path.home() / ".xhs-mcp"
 COOKIE_FILE = COOKIE_DIR / "cookies.json"
+REMOTE_IMAGE_DIR = COOKIE_DIR / "remote-images"
+
+ALLOWED_IMAGE_HOSTS = frozenset(
+    host.strip().rstrip(".").lower()
+    for host in os.environ.get(
+        "XHS_MCP_IMAGE_HOSTS", "tempfile.aiquickdraw.com"
+    ).split(",")
+    if host.strip()
+)
+ALLOWED_LOCAL_IMAGE_ROOTS = tuple(
+    Path(root.strip()).resolve()
+    for root in os.environ.get(
+        "XHS_MCP_LOCAL_IMAGE_ROOTS", "/data/test-assets,/data/publish-input"
+    ).split(",")
+    if root.strip()
+)
+MAX_IMAGE_BYTES = int(os.environ.get("XHS_MCP_IMAGE_MAX_BYTES", str(15 * 1024 * 1024)))
+MAX_IMAGE_COUNT = int(os.environ.get("XHS_MCP_IMAGE_MAX_COUNT", "9"))
+IMAGE_DOWNLOAD_TIMEOUT = float(os.environ.get("XHS_MCP_IMAGE_TIMEOUT", "15"))
+MAX_IMAGE_REDIRECTS = 3
 
 mcp = FastMCP("xhs-mcp")
 
@@ -23,6 +49,153 @@ _pw = None
 _browser = None
 _ctx = None
 _page = None
+
+
+def _detect_image_type(header: bytes) -> tuple[str, str]:
+    """Return a safe filename suffix and MIME type from image magic bytes."""
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png", "image/png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg", "image/jpeg"
+    raise ValueError("Only valid PNG and JPEG images are supported")
+
+
+def _validate_public_image_url(url: str):
+    """Validate scheme, host allowlist, port, and all current DNS results."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Invalid image URL") from exc
+
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Remote images must use HTTPS")
+    if not hostname or parsed.username or parsed.password:
+        raise ValueError("Invalid image URL authority")
+    if hostname not in ALLOWED_IMAGE_HOSTS:
+        raise ValueError(f"Image host is not allowed: {hostname}")
+    if port not in (None, 443):
+        raise ValueError("Remote image URLs may only use port 443")
+
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ValueError(f"Unable to resolve image host: {hostname}") from exc
+    if not addresses:
+        raise ValueError(f"Unable to resolve image host: {hostname}")
+    for address in addresses:
+        if not ipaddress.ip_address(address).is_global:
+            raise ValueError(f"Image host resolves to a non-public address: {hostname}")
+    return parsed
+
+
+def _download_remote_image(url: str) -> tuple[str, str]:
+    """Download an allowlisted public HTTPS image with redirect and size controls."""
+    current_url = url
+    for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
+        parsed = _validate_public_image_url(current_url)
+        hostname = parsed.hostname.rstrip(".").lower()
+        target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        connection = http.client.HTTPSConnection(
+            hostname,
+            port=parsed.port or 443,
+            timeout=IMAGE_DOWNLOAD_TIMEOUT,
+            context=ssl.create_default_context(),
+        )
+        try:
+            connection.connect()
+            peer_address = connection.sock.getpeername()[0]
+            if not ipaddress.ip_address(peer_address).is_global:
+                raise ValueError("Image connection reached a non-public address")
+            connection.request(
+                "GET",
+                target,
+                headers={
+                    "Accept": "image/png,image/jpeg",
+                    "User-Agent": "xhs-mcp-v2-image-fetcher/1.0",
+                },
+            )
+            response = connection.getresponse()
+
+            if response.status in (301, 302, 303, 307, 308):
+                if redirect_count >= MAX_IMAGE_REDIRECTS:
+                    raise ValueError("Remote image exceeded the redirect limit")
+                location = response.getheader("Location")
+                if not location:
+                    raise ValueError("Remote image redirect has no location")
+                current_url = urljoin(current_url, location)
+                continue
+
+            if response.status != 200:
+                raise ValueError(f"Remote image returned HTTP {response.status}")
+
+            content_type = response.getheader("Content-Type", "").split(";", 1)[0].lower()
+            if content_type not in ("image/png", "image/jpeg"):
+                raise ValueError(f"Remote response is not an allowed image type: {content_type}")
+            content_length = response.getheader("Content-Length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_IMAGE_BYTES:
+                        raise ValueError("Remote image exceeds the size limit")
+                except ValueError as exc:
+                    if "exceeds" in str(exc):
+                        raise
+                    raise ValueError("Remote image has an invalid Content-Length") from exc
+
+            payload = bytearray()
+            while True:
+                chunk = response.read(min(64 * 1024, MAX_IMAGE_BYTES + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                if len(payload) > MAX_IMAGE_BYTES:
+                    raise ValueError("Remote image exceeds the size limit")
+            if not payload:
+                raise ValueError("Remote image is empty")
+
+            suffix, detected_type = _detect_image_type(payload[:16])
+            if detected_type != content_type:
+                raise ValueError("Remote image MIME type does not match its file content")
+
+            REMOTE_IMAGE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(REMOTE_IMAGE_DIR, 0o700)
+            fd, file_path = tempfile.mkstemp(
+                prefix="cdn-", suffix=suffix, dir=REMOTE_IMAGE_DIR
+            )
+            try:
+                with os.fdopen(fd, "wb") as image_file:
+                    image_file.write(payload)
+                os.chmod(file_path, 0o600)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                Path(file_path).unlink(missing_ok=True)
+                raise
+            return file_path, detected_type
+        finally:
+            connection.close()
+
+    raise ValueError("Remote image exceeded the redirect limit")
+
+
+def _validate_local_image(file_path: str) -> tuple[str, str]:
+    """Restrict local image reads to configured roots and validate their content."""
+    path = Path(file_path).resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Image is not a regular file: {file_path}")
+    if not any(path.is_relative_to(root) for root in ALLOWED_LOCAL_IMAGE_ROOTS):
+        raise ValueError("Local image path is outside the allowed directories")
+    if path.stat().st_size > MAX_IMAGE_BYTES:
+        raise ValueError("Local image exceeds the size limit")
+    with path.open("rb") as image_file:
+        suffix, mime_type = _detect_image_type(image_file.read(16))
+    return str(path), mime_type
 
 
 def _ensure_browser():
@@ -74,6 +247,10 @@ def _load_cookies() -> list[dict]:
             raw = json.load(f)
     except Exception:
         return []
+
+    # Accept the wrapped cookie export used by the existing MCP deployment.
+    if isinstance(raw, dict) and isinstance(raw.get("cookies"), list):
+        raw = raw["cookies"]
 
     # Playwright format: list of {name, value, domain, path, ...}
     if isinstance(raw, list) and raw and "name" in raw[0]:
@@ -315,27 +492,40 @@ def publish_content(
     Args:
         title: Note title (max ~20 Chinese characters)
         content: Note body text
-        images: List of local image file paths (at least 1 required)
+        images: List of allowlisted HTTPS image URLs or allowed local file paths
+                (at least 1 required)
         tags: Optional topic tags, e.g. ["AI", "科技"]  (max 10)
         is_private: Whether to publish as private note
         post_time: Optional scheduled publish time, format "2024-01-20 10:30:00"
     """
     if not images:
         return _err("At least 1 image is required")
-    for img in images:
-        if not os.path.exists(img):
-            return _err(f"Image not found: {img}")
+    if len(images) > MAX_IMAGE_COUNT:
+        return _err(f"At most {MAX_IMAGE_COUNT} images are allowed")
 
+    downloaded_images = []
     try:
+        prepared_images = []
+        for image in images:
+            scheme = urlsplit(image).scheme.lower()
+            if scheme in ("http", "https"):
+                local_path, mime_type = _download_remote_image(image)
+                downloaded_images.append(local_path)
+            elif scheme:
+                raise ValueError(f"Unsupported image URL scheme: {scheme}")
+            else:
+                local_path, mime_type = _validate_local_image(image)
+            prepared_images.append((local_path, mime_type))
+
         # 1. Upload images
         image_infos = []
-        for img_path in images:
+        for img_path, mime_type in prepared_images:
             file_id = _upload_image(img_path)
             image_infos.append({
                 "file_id": file_id,
                 "metadata": {"source": -1},
                 "stickers": {"version": 2, "floating": []},
-                "extra_info_json": '{"mimeType":"image/jpeg"}',
+                "extra_info_json": json.dumps({"mimeType": mime_type}, separators=(",", ":")),
             })
 
         # 2. Resolve tags to topics
@@ -398,6 +588,12 @@ def publish_content(
 
     except Exception as e:
         return _err(str(e))
+    finally:
+        for file_path in downloaded_images:
+            try:
+                Path(file_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # ──────────────────── Browse Tools ────────────────────
@@ -506,7 +702,12 @@ def main():
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     else:
-        mcp.run(transport="http", port=args.port, stateless_http=True)
+        mcp.run(
+            transport="http",
+            host=os.environ.get("XHS_MCP_HOST", "127.0.0.1"),
+            port=args.port,
+            stateless_http=True,
+        )
 
 
 if __name__ == "__main__":

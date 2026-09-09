@@ -1,0 +1,35 @@
+name: xhs-mcp-api-first
+
+services:
+  xhs-mcp:
+    image: ${XHS_MCP_IMAGE}:${XHS_MCP_VERSION}
+    container_name: xhs-mcp-v2
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    ports:
+      - "127.0.0.1:${XHS_MCP_PORT:-18061}:18061"
+    volumes:
+      - ./data/xhs-state:/data/.xhs-mcp
+      - ./data/publish-input:/data/publish-input:ro
+    environment:
+      HOME: /data
+      TZ: Asia/Beijing
+      XHS_MCP_HOST: 0.0.0.0
+      XHS_MCP_IMAGE_HOSTS: ${XHS_MCP_IMAGE_HOSTS}
+      XHS_MCP_LOCAL_IMAGE_ROOTS: /data/publish-input
+      XHS_MCP_IMAGE_MAX_BYTES: ${XHS_MCP_IMAGE_MAX_BYTES:-15728640}
+      XHS_MCP_IMAGE_MAX_COUNT: ${XHS_MCP_IMAGE_MAX_COUNT:-9}
+      XHS_MCP_IMAGE_TIMEOUT: ${XHS_MCP_IMAGE_TIMEOUT:-15}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 18061), timeout=5).close()"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 45s
+    security_opt:
+      - no-new-privileges:true

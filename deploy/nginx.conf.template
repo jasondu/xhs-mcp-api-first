@@ -1,0 +1,49 @@
+limit_req_zone $binary_remote_addr zone=xhs_mcp_limit:10m rate=5r/s;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __MCP_DOMAIN__;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name __MCP_DOMAIN__;
+
+    ssl_certificate /etc/letsencrypt/live/__MCP_DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__MCP_DOMAIN__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location = /mcp {
+        if ($http_authorization != "Bearer __MCP_BEARER_TOKEN__") {
+            return 401;
+        }
+
+        limit_req zone=xhs_mcp_limit burst=10 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:__MCP_PORT__/mcp;
+        proxy_http_version 1.1;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        return 404;
+    }
+}

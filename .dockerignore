@@ -1,0 +1,10 @@
+.git
+.github
+.gitignore
+data
+deploy
+__pycache__
+*.pyc
+.venv
+*.md
+!README.md

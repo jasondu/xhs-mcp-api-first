@@ -2,6 +2,12 @@
 
 <!-- mcp-name: io.github.shanyang-me/xiaohongshu-mcp -->
 
+> Private deployment fork maintained by `jasondu`, based on
+> [`shanyang-me/xhs-mcp`](https://github.com/shanyang-me/xhs-mcp). It adds an
+> isolated Docker deployment, wrapped-cookie compatibility, configurable HTTP
+> binding, and security-checked HTTPS CDN image inputs. The upstream MIT
+> license is preserved.
+
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for [Xiaohongshu (Little Red Book)](https://www.xiaohongshu.com) - China's leading lifestyle social media platform.
 
 Publish image notes, search content, view note details, and manage your account - all through MCP tools that AI assistants can use directly.
@@ -42,6 +48,26 @@ pip install "xiaohongshu-mcp[qrcode]"
 ```
 
 ## Quick Start
+
+### Docker deployment
+
+The release image contains Chromium and its Linux dependencies; production
+servers do not need a host Playwright cache or a source-code bind mount.
+
+```bash
+cp deploy/.env.example deploy/.env
+mkdir -p deploy/data/xhs-state deploy/data/publish-input
+docker compose --env-file deploy/.env -f deploy/compose.yaml up -d
+```
+
+Persistent login state is stored in `deploy/data/xhs-state`. Never commit this
+directory. See [`deploy/README.md`](deploy/README.md) for HTTPS, migration, and
+smoke-test instructions.
+
+`publish_content.images` accepts allowed local paths and allowlisted HTTPS CDN
+URLs. Remote images are limited by scheme, hostname, public IP resolution,
+redirect count, MIME/magic bytes, size, count, and timeout, and temporary files
+are deleted after each call.
 
 ### 1. Start the server
 

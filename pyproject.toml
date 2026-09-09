@@ -1,6 +1,6 @@
 [project]
 name = "xiaohongshu-mcp-server"
-version = "0.1.1"
+version = "0.2.0"
 description = "Xiaohongshu (Little Red Book) MCP server - publish, search, and manage content via Model Context Protocol"
 readme = "README.md"
 license = "MIT"
@@ -18,23 +18,24 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "xhs>=0.2.13",
-    "fastmcp>=2.0.0",
-    "uvicorn>=0.34.0",
-    "playwright>=1.40",
-    "playwright-stealth>=2.0",
+    "xhs==0.2.13",
+    "fastmcp==4.0.3",
+    "uvicorn==0.52.4",
+    "playwright==1.62.0",
+    "playwright-stealth==2.0.3",
 ]
 
 [project.optional-dependencies]
-qrcode = ["qrcode[pil]>=7.4"]
+qrcode = ["qrcode[pil]==8.2"]
 
 [project.scripts]
 xhs-mcp = "xhs_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/shanyang-me/xhs-mcp"
-Repository = "https://github.com/shanyang-me/xhs-mcp"
-Issues = "https://github.com/shanyang-me/xhs-mcp/issues"
+Homepage = "https://github.com/jasondu/xhs-mcp-api-first"
+Repository = "https://github.com/jasondu/xhs-mcp-api-first"
+Issues = "https://github.com/jasondu/xhs-mcp-api-first/issues"
+Upstream = "https://github.com/shanyang-me/xhs-mcp"
 
 [build-system]
 requires = ["setuptools>=75.0"]
