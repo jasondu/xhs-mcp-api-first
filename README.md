@@ -2,6 +2,8 @@
 
 <!-- mcp-name: io.github.shanyang-me/xiaohongshu-mcp -->
 
+[English](README.md) | [简体中文](README_CN.md)
+
 > Private deployment fork maintained by `jasondu`, based on
 > [`shanyang-me/xhs-mcp`](https://github.com/shanyang-me/xhs-mcp). It adds an
 > isolated Docker deployment, wrapped-cookie compatibility, configurable HTTP
